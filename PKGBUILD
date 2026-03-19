@@ -1,5 +1,5 @@
-# Maintainer: Your Name <your.email@example.com>
-pkgname=waybar-mpris-lyrics-git
+# Maintainer: kndxhz <kndxhz@163.com>
+pkgname=waybar-mpris-lyrics
 pkgver=1.0.0.r0.gGITCOMMIT
 pkgrel=1
 pkgdesc="A Waybar custom module that displays synchronized lyrics from MPRIS players"
@@ -9,19 +9,19 @@ license=('MIT')
 depends=('glibc')
 makedepends=('go' 'git')
 optdepends=('playerctl: For media control support')
-provides=("${pkgname%-git}")
-conflicts=("${pkgname%-git}")
+provides=("${pkgname%}")
+conflicts=("${pkgname%}")
 source=("git+${url}.git")
 sha256sums=('SKIP')
 
 pkgver() {
-    cd "$srcdir/${pkgname%-git}"
+    cd "$srcdir/${pkgname%}"
     git describe --long --tags 2>/dev/null | sed 's/\([^-]*-g\)/r\1/;s/-/./g' || \
     printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
 }
 
 build() {
-    cd "$srcdir/${pkgname%-git}"
+    cd "$srcdir/${pkgname%}"
     export CGO_CPPFLAGS="${CPPFLAGS}"
     export CGO_CFLAGS="${CFLAGS}"
     export CGO_CXXFLAGS="${CXXFLAGS}"
@@ -31,7 +31,7 @@ build() {
 }
 
 package() {
-    cd "$srcdir/${pkgname%-git}"
+    cd "$srcdir/${pkgname%}"
     install -Dm755 waybar-mpris-lyrics "$pkgdir/usr/bin/waybar-mpris-lyrics"
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
     if [ -f LICENSE ]; then
