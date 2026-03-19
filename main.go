@@ -7,7 +7,10 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -32,6 +35,22 @@ type LyricData struct {
 type LyricResult struct {
 	Original   string // 原歌词
 	Translation string // 翻译歌词
+}
+
+type WaybarOutput struct {
+	Text    string `json:"text"`
+	Tooltip string `json:"tooltip"`
+	Class   string `json:"class,omitempty"`
+}
+
+type TimedLyricLine struct {
+	TimeMs int64
+	Text   string
+}
+
+type ParsedLyrics struct {
+	Original    []TimedLyricLine
+	Translation []TimedLyricLine
 }
 
 // SearchResult 定义搜索API响应结构
@@ -68,69 +87,282 @@ type PlayerMetadata struct {
 	Title     string
 	Artist    string
 	Album     string
-	Duration  int64  // 时长 (毫秒)
+	Duration  int64  // 时长 (微秒)
+	Position  int64  // 播放位置 (微秒)
 	ArtUrl    string
 }
 
 func main() {
-	// 从播放器获取元数据
-	metadata := getPlayerMetadata()
-	if metadata == nil {
-		fmt.Println("错误: 无法获取播放器信息")
-		return
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+
+	lastSongKey := ""
+	lastRendered := ""
+	var currentLyrics *ParsedLyrics
+
+	for {
+		metadata := getPlayerMetadata()
+		if metadata == nil {
+			empty := renderWaybar(WaybarOutput{Text: "", Tooltip: "", Class: "stopped"})
+			if empty != lastRendered {
+				fmt.Println(empty)
+				lastRendered = empty
+			}
+			lastSongKey = ""
+			<-ticker.C
+			continue
+		}
+
+		songKey := buildSongKey(metadata)
+		if songKey != lastSongKey {
+			currentLyrics = resolveLyrics(metadata)
+			lastSongKey = songKey
+		}
+
+		text := buildCurrentLyricText(metadata, currentLyrics)
+		if text == "" {
+			text = buildText(metadata)
+		}
+
+		out := WaybarOutput{
+			Text:    text,
+			Tooltip: buildText(metadata),
+			Class:   "lyrics",
+		}
+		rendered := renderWaybar(out)
+		if rendered != lastRendered {
+			fmt.Println(rendered)
+			lastRendered = rendered
+		}
+
+		<-ticker.C
 	}
+}
 
-	fmt.Printf("播放器: %s\n", metadata.Player)
-	fmt.Printf("标题: %s\n", metadata.Title)
-	fmt.Printf("艺术家: %s\n", metadata.Artist)
-	if metadata.Album != "" {
-		fmt.Printf("专辑: %s\n", metadata.Album)
+func buildSongKey(metadata *PlayerMetadata) string {
+	return strings.Join([]string{
+		metadata.Player,
+		metadata.TrackID,
+		metadata.Title,
+		metadata.Artist,
+		metadata.Album,
+	}, "|")
+}
+
+func buildText(metadata *PlayerMetadata) string {
+	if metadata.Artist == "" {
+		return metadata.Title
 	}
+	return metadata.Artist + " - " + metadata.Title
+}
 
-	var song_id string
+func renderWaybar(out WaybarOutput) string {
+	buf, err := json.Marshal(out)
+	if err != nil {
+		return `{"text":"","tooltip":"","class":"error"}`
+	}
+	return string(buf)
+}
 
-	// 如果是 splayer，直接从 TrackID 提取歌曲ID
-	if metadata.Player == "splayer" && metadata.TrackID != "" {
-		// 从 '/com/splayer/track/3349609304' 提取数字ID
+func resolveLyrics(metadata *PlayerMetadata) *ParsedLyrics {
+	var songID string
+
+	if strings.HasPrefix(metadata.Player, "splayer") && metadata.TrackID != "" {
 		re := regexp.MustCompile(`/(\d+)$`)
 		matches := re.FindStringSubmatch(metadata.TrackID)
 		if len(matches) > 1 {
-			song_id = matches[1]
-			fmt.Printf("从 splayer 提取的歌曲ID: %s\n", song_id)
+			songID = matches[1]
 		}
 	}
 
-	// 如果没有 song_id，尝试搜索
-	if song_id == "" {
-		song_id = searchSong(metadata.Title, metadata.Artist)
-		if song_id == "" {
-			fmt.Println("警告: 网易云未找到歌曲，尝试 lrclib...")
-			// 尝试 lrclib 搜索
-			durationSec := int(metadata.Duration / 1000) // 毫秒转秒
-			lrcLibResult := searchLrcLib(metadata.Title, metadata.Artist, metadata.Album, durationSec)
-			if lrcLibResult != nil {
-				fmt.Println("\n=== 来自 lrclib 的歌词 ===")
-				fmt.Println(lrcLibResult.Original)
-				return
+	if songID == "" {
+		songID = searchSong(metadata.Title, metadata.Artist)
+	}
+
+	if songID != "" {
+		result := get_lyrics(songID)
+		if result != nil {
+			if strings.TrimSpace(result.Translation) == "" {
+				orig, trans := parseLRCWithInlineTranslation(result.Original)
+				if len(trans) > 0 {
+					return &ParsedLyrics{
+						Original:    orig,
+						Translation: trans,
+					}
+				}
 			}
-			fmt.Println("错误: 两个数据源都未找到歌词")
-			return
+
+			return &ParsedLyrics{
+				Original:    parseLRC(result.Original),
+				Translation: parseLRC(result.Translation),
+			}
 		}
-		fmt.Printf("搜索得到的歌曲ID: %s\n", song_id)
 	}
 
-	// 获取歌词
-	result := get_lyrics(song_id)
-	if result != nil {
-		fmt.Println("\n=== 原歌词 ===")
-		fmt.Println(result.Original)
-		if result.Translation != "" {
-			fmt.Println("\n=== 翻译歌词 ===")
-			fmt.Println(result.Translation)
+	durationSec := int(metadata.Duration / 1000000)
+	lrcLibResult := searchLrcLib(metadata.Title, metadata.Artist, metadata.Album, durationSec)
+	if lrcLibResult != nil {
+		if lrcLibResult.SyncedLyrics != "" {
+			return &ParsedLyrics{Original: parseLRC(lrcLibResult.SyncedLyrics)}
 		}
-	} else {
-		fmt.Println("错误: 无法获取歌词")
+		if lrcLibResult.PlainLyrics != "" {
+			return &ParsedLyrics{Original: []TimedLyricLine{{TimeMs: 0, Text: lrcLibResult.PlainLyrics}}}
+		}
 	}
+
+	return nil
+}
+
+func parseLRC(content string) []TimedLyricLine {
+	if strings.TrimSpace(content) == "" {
+		return nil
+	}
+
+	lineRe := regexp.MustCompile(`\[(\d{2}):(\d{2})(?:\.(\d{1,3}))?\]`)
+	var result []TimedLyricLine
+
+	for _, line := range strings.Split(content, "\n") {
+		matches := lineRe.FindAllStringSubmatch(line, -1)
+		if len(matches) == 0 {
+			continue
+		}
+
+		text := strings.TrimSpace(lineRe.ReplaceAllString(line, ""))
+		for _, m := range matches {
+			mm, err1 := strconv.Atoi(m[1])
+			ss, err2 := strconv.Atoi(m[2])
+			if err1 != nil || err2 != nil {
+				continue
+			}
+
+			ms := 0
+			if m[3] != "" {
+				frac := m[3]
+				switch len(frac) {
+				case 1:
+					frac += "00"
+				case 2:
+					frac += "0"
+				}
+				ms, _ = strconv.Atoi(frac)
+			}
+
+			timeMs := int64(mm*60*1000 + ss*1000 + ms)
+			result = append(result, TimedLyricLine{TimeMs: timeMs, Text: text})
+		}
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].TimeMs < result[j].TimeMs
+	})
+
+	return result
+}
+
+func parseLRCWithInlineTranslation(content string) ([]TimedLyricLine, []TimedLyricLine) {
+	if strings.TrimSpace(content) == "" {
+		return nil, nil
+	}
+
+	lineRe := regexp.MustCompile(`\[(\d{2}):(\d{2})(?:\.(\d{1,3}))?\]`)
+	var original []TimedLyricLine
+	var translation []TimedLyricLine
+
+	for _, line := range strings.Split(content, "\n") {
+		matches := lineRe.FindAllStringSubmatch(line, -1)
+		if len(matches) == 0 {
+			continue
+		}
+
+		text := strings.TrimSpace(lineRe.ReplaceAllString(line, ""))
+		parts := strings.SplitN(text, "|", 2)
+		origText := strings.TrimSpace(parts[0])
+		transText := ""
+		if len(parts) == 2 {
+			transText = strings.TrimSpace(parts[1])
+		}
+
+		for _, m := range matches {
+			mm, err1 := strconv.Atoi(m[1])
+			ss, err2 := strconv.Atoi(m[2])
+			if err1 != nil || err2 != nil {
+				continue
+			}
+
+			ms := 0
+			if m[3] != "" {
+				frac := m[3]
+				switch len(frac) {
+				case 1:
+					frac += "00"
+				case 2:
+					frac += "0"
+				}
+				ms, _ = strconv.Atoi(frac)
+			}
+
+			timeMs := int64(mm*60*1000 + ss*1000 + ms)
+			if origText != "" {
+				original = append(original, TimedLyricLine{TimeMs: timeMs, Text: origText})
+			}
+			if transText != "" {
+				translation = append(translation, TimedLyricLine{TimeMs: timeMs, Text: transText})
+			}
+		}
+	}
+
+	sort.Slice(original, func(i, j int) bool {
+		return original[i].TimeMs < original[j].TimeMs
+	})
+	sort.Slice(translation, func(i, j int) bool {
+		return translation[i].TimeMs < translation[j].TimeMs
+	})
+
+	return original, translation
+}
+
+func currentLineAt(lines []TimedLyricLine, positionMs int64) string {
+	if len(lines) == 0 {
+		return ""
+	}
+
+	idx := sort.Search(len(lines), func(i int) bool {
+		return lines[i].TimeMs > positionMs
+	})
+	if idx == 0 {
+		return ""
+	}
+
+	return strings.TrimSpace(lines[idx-1].Text)
+}
+
+func buildCurrentLyricText(metadata *PlayerMetadata, lyrics *ParsedLyrics) string {
+	if lyrics == nil {
+		return ""
+	}
+
+	positionMs := metadata.Position / 1000
+	original := currentLineAt(lyrics.Original, positionMs)
+	translation := currentLineAt(lyrics.Translation, positionMs)
+ 
+	if original == "" && translation == "" {
+		return ""
+	}
+
+	if translation == "" || translation == original {
+		return original
+	}
+
+	if original == "" {
+		return translation
+	}
+
+	// Use Pango markup for multiline: <span size='small'>...</span>
+	// But simply \n works if Waybar label supports it.
+	// Let's try to return Text as is, but maybe the issue is newlines being stripped by Waybar or not rendered if height is small.
+	// A common trick is to use <span rise='-1000'> or separate lines.
+	// But let's first ensure we are flushing stdout.
+	return original + "\n" + translation
 }
 
 // getPlayerMetadata 通过 D-Bus MPRIS 接口获取播放器元数据
@@ -138,7 +370,6 @@ func getPlayerMetadata() *PlayerMetadata {
 	// 连接到 D-Bus
 	conn, err := dbus.SessionBus()
 	if err != nil {
-		fmt.Println("错误: 连接 D-Bus 失败", err)
 		return nil
 	}
 	defer conn.Close()
@@ -147,7 +378,6 @@ func getPlayerMetadata() *PlayerMetadata {
 	var names []string
 	err = conn.BusObject().Call("org.freedesktop.DBus.ListNames", 0).Store(&names)
 	if err != nil {
-		fmt.Println("错误: 列出 DBus 名称失败", err)
 		return nil
 	}
 
@@ -183,7 +413,6 @@ func getPlayerMetadata() *PlayerMetadata {
 	}
 
 	if !foundPlayer {
-		fmt.Println("错误: 未找到 MPRIS 播放器")
 		return nil
 	}
 
@@ -198,7 +427,6 @@ func getPlayerMetadata() *PlayerMetadata {
 	var allProps map[string]dbus.Variant
 	err = mediaPlayer.Call("org.freedesktop.DBus.Properties.GetAll", 0, "org.mpris.MediaPlayer2.Player").Store(&allProps)
 	if err != nil {
-		fmt.Println("错误: 获取播放器属性失败", err)
 		return nil
 	}
 
@@ -211,8 +439,13 @@ func getPlayerMetadata() *PlayerMetadata {
 	}
 
 	if metadata_map == nil {
-		fmt.Println("错误: Metadata 为空或格式错误")
 		return nil
+	}
+
+	if val, ok := allProps["Position"]; ok {
+		if pos, ok := val.Value().(int64); ok {
+			metadata.Position = pos
+		}
 	}
 
 	// 解析元数据
@@ -279,7 +512,6 @@ func getPlayerMetadata() *PlayerMetadata {
 	}
 
 	if metadata.Title == "" || metadata.Artist == "" {
-		fmt.Println("错误: 无法从播放器获取标题或艺术家")
 		return nil
 	}
 
@@ -298,7 +530,6 @@ func searchSong(title, artist string) string {
 	client := &http.Client{}
 	req, err := http.NewRequest("GET", searchURL, nil)
 	if err != nil {
-		fmt.Println("错误: 创建搜索请求失败", err)
 		return ""
 	}
 
@@ -306,54 +537,48 @@ func searchSong(title, artist string) string {
 
 	res, err := client.Do(req)
 	if err != nil {
-		fmt.Println("错误: 搜索请求失败", err)
 		return ""
 	}
 	defer res.Body.Close()
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		fmt.Println("错误: 读取搜索响应失败", err)
 		return ""
 	}
 
 	var searchResult SearchResult
 	err = json.Unmarshal(body, &searchResult)
 	if err != nil {
-		fmt.Println("错误: 解析搜索响应失败", err)
 		return ""
 	}
 
 	if searchResult.Code != 200 {
-		fmt.Printf("错误: 搜索API返回错误代码 %d\n", searchResult.Code)
 		return ""
 	}
 
 	if len(searchResult.Result.Songs) == 0 {
-		fmt.Println("提示: 搜索未找到歌曲")
 		return ""
 	}
 
 	// 返回第一个结果的ID
-	song_id := fmt.Sprintf("%d", searchResult.Result.Songs[0].ID)
+	song_id := strconv.Itoa(searchResult.Result.Songs[0].ID)
 	return song_id
 }
 
 // searchLrcLib 在 lrclib 中搜索歌词
-func searchLrcLib(trackName, artistName, albumName string, duration int) *LyricResult {
+func searchLrcLib(trackName, artistName, albumName string, duration int) *LrcLibResult {
 	// 构建查询参数
 	params := url.Values{}
 	params.Add("track_name", trackName)
 	params.Add("artist_name", artistName)
 	params.Add("album_name", albumName)
-	params.Add("duration", fmt.Sprintf("%d", duration))
+	params.Add("duration", strconv.Itoa(duration))
 
 	searchURL := base_lrclib + "/api/get?" + params.Encode()
 
 	client := &http.Client{}
 	req, err := http.NewRequest("GET", searchURL, nil)
 	if err != nil {
-		fmt.Println("错误: 创建 lrclib 请求失败", err)
 		return nil
 	}
 
@@ -361,40 +586,31 @@ func searchLrcLib(trackName, artistName, albumName string, duration int) *LyricR
 
 	res, err := client.Do(req)
 	if err != nil {
-		fmt.Println("错误: lrclib 请求失败", err)
 		return nil
 	}
 	defer res.Body.Close()
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		fmt.Println("错误: 读取 lrclib 响应失败", err)
 		return nil
 	}
 
 	// 处理 404
 	if res.StatusCode == 404 {
-		fmt.Println("提示: lrclib 未找到歌曲")
 		return nil
 	}
 
 	if res.StatusCode != 200 {
-		fmt.Printf("错误: lrclib 返回状态码 %d\n", res.StatusCode)
 		return nil
 	}
 
 	var lrcLibResult LrcLibResult
 	err = json.Unmarshal(body, &lrcLibResult)
 	if err != nil {
-		fmt.Println("错误: 解析 lrclib 响应失败", err)
 		return nil
 	}
 
-	// 返回 lrclib 的歌词
-	return &LyricResult{
-		Original:   lrcLibResult.PlainLyrics,
-		Translation: "", // lrclib 不提供翻译
-	}
+	return &lrcLibResult
 }
 
 func get_lyrics(song_id string) *LyricResult {
@@ -406,21 +622,18 @@ func get_lyrics(song_id string) *LyricResult {
 	req, err := http.NewRequest(method, url, nil)
 
 	if err != nil {
-		fmt.Println("错误: 创建请求失败", err)
 		return nil
 	}
 	req.Header.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (HTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0")
 
 	res, err := client.Do(req)
 	if err != nil {
-		fmt.Println("错误: 请求失败", err)
 		return nil
 	}
 	defer res.Body.Close()
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		fmt.Println("错误: 读取响应失败", err)
 		return nil
 	}
 
@@ -428,12 +641,10 @@ func get_lyrics(song_id string) *LyricResult {
 	var data LyricData
 	err = json.Unmarshal(body, &data)
 	if err != nil {
-		fmt.Println("错误: JSON解析失败", err)
 		return nil
 	}
 
 	if data.Code != 200 {
-		fmt.Println("错误: API返回错误代码", data.Code)
 		return nil
 	}
 
