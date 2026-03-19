@@ -16,7 +16,7 @@
 
 ### Arch Linux（AUR）
 
-可从 AUR 安装：
+可从 AUR 安装(还没提交,请稍等一段时间...)：
 
 ```bash
 yay -S waybar-mpris-lyrics
