@@ -9,13 +9,13 @@ import (
 var base_163 = "https://music.163.com"
 
 func main() {
-	var song_id string = "144441"
+	var song_id string = "18520488"
 	get_lyrics(song_id)
 }
 
 func get_lyrics(song_id string) {
 	//获取网易云歌词接口
-	url := base_163 + "/api/song/lyric?id=" + song_id + "&os=pc&lv=-1"
+	url := base_163 + "/api/song/lyric?id=" + song_id + "&lv=1&tv=1"
 	method := "GET"
 
 	client := &http.Client {
