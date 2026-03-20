@@ -1,23 +1,22 @@
 # Maintainer: kndxhz <kndxhz@163.com>
-pkgname=waybar-mpris-lyrics
-pkgver=1.0.0.r0.gGITCOMMIT
+pkgname=waybar-mpris-lyrics-git
+pkgver=r0.0000000
 pkgrel=1
 pkgdesc="A Waybar custom module that displays synchronized lyrics from MPRIS players"
 arch=('x86_64')
 url="https://github.com/kndxhz/waybar-MPRIS-lyrics"
-license=('MIT')
+license=('GPL3')
 depends=('glibc')
 makedepends=('go' 'git')
 optdepends=('playerctl: For media control support')
-provides=("${pkgname%}")
-conflicts=("${pkgname%}")
+provides=('waybar-mpris-lyrics')
+conflicts=('waybar-mpris-lyrics')
 source=("git+${url}.git")
 sha256sums=('SKIP')
 
 pkgver() {
     cd "$srcdir/${pkgname%}"
-    git describe --long --tags 2>/dev/null | sed 's/\([^-]*-g\)/r\1/;s/-/./g' || \
-    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
 }
 
 build() {
@@ -27,6 +26,7 @@ build() {
     export CGO_CXXFLAGS="${CXXFLAGS}"
     export CGO_LDFLAGS="${LDFLAGS}"
     export GOFLAGS="-buildmode=pie -trimpath -ldflags=-linkmode=external -mod=readonly -modcacherw"
+
     go build -o waybar-mpris-lyrics .
 }
 
