@@ -1,6 +1,6 @@
 # Maintainer: kndxhz <kndxhz@163.com>
 pkgname=waybar-mpris-lyrics-git
-pkgver=r0.0000000
+pkgver=r14.d86247d
 pkgrel=1
 pkgdesc="A Waybar custom module that displays synchronized lyrics from MPRIS players"
 arch=('x86_64')
@@ -11,16 +11,16 @@ makedepends=('go' 'git')
 optdepends=('playerctl: For media control support')
 provides=('waybar-mpris-lyrics')
 conflicts=('waybar-mpris-lyrics')
-source=("git+${url}.git")
+source=("${pkgname%-git}::git+${url}.git")
 sha256sums=('SKIP')
 
 pkgver() {
-    cd "$srcdir/${pkgname%}"
+    cd "$srcdir/${pkgname%-git}"
     printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
 }
 
 build() {
-    cd "$srcdir/${pkgname%}"
+    cd "$srcdir/${pkgname%-git}"
     export CGO_CPPFLAGS="${CPPFLAGS}"
     export CGO_CFLAGS="${CFLAGS}"
     export CGO_CXXFLAGS="${CXXFLAGS}"
@@ -31,7 +31,7 @@ build() {
 }
 
 package() {
-    cd "$srcdir/${pkgname%}"
+    cd "$srcdir/${pkgname%-git}"
     install -Dm755 waybar-mpris-lyrics "$pkgdir/usr/bin/waybar-mpris-lyrics"
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
     if [ -f LICENSE ]; then

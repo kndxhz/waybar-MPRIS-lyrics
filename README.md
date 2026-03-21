@@ -31,7 +31,7 @@ yay -S waybar-mpris-lyrics-git
 2.  **构建**：
 
     ```bash
-    git clone https://github.com/yourusername/waybar-MPRIS-lyrics.git
+    git clone https://github.com/kndxhz/waybar-MPRIS-lyrics.git
     cd waybar-MPRIS-lyrics
     go build -o waybar-mpris-lyrics
     ```
